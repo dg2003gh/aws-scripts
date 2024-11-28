@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+# Check if the input CSV file is provided
+if [ "$#" -ne 1 ]; then
+    echo "Usage: $0 <path_to_csv_file>"
+    exit 1
+fi
+
+CSV_FILE="$1"
+
+# Read the CSV file line by line
+while IFS=, read -r bucket_name tag; do
+    # Skip the header line if it exists
+    if [[ "$bucket_name" == "bucket_name" ]]; then
+        continue
+    fi
+
+    # Check if bucket_name and tag are not empty
+    if [[ -z "$bucket_name" || -z "$tag" ]]; then
+        echo "Skipping line with empty bucket name or tag."
+        continue
+    fi
+
+    # Create the tag in the correct format
+    tag_key="${tag%%=*}"
+    tag_value="${tag#*=}"
+
+    # Retrieve existing tags
+    existing_tags=$(aws s3api get-bucket-tagging --bucket "$bucket_name" --query 'TagSet' --output json 2>/dev/null)
+
+    # Check if the bucket has existing tags
+    if [[ $? -eq 0 ]]; then
+        # Add the new tag to the existing tags using jq
+        updated_tags=$(echo "$existing_tags" | jq --arg k "$tag_key" --arg v "$tag_value" '. += [{"Key": $k, "Value": $v}]')
+    else
+        # If no tags exist, create a new tag set
+        updated_tags=$(printf '[{"Key": "%s", "Value": "%s"}]' "$tag_key" "$tag_value")
+    fi
+
+    # Format the updated tags for the AWS CLI
+    tagging_json=$(echo -e "$updated_tags")
+    tagging_json="${tagging_json//\"}"
+    tagging_json="${tagging_json//\:/=}"
+
+    # Insert the updated tag set into the S3 bucket
+    echo "Tagging bucket '$bucket_name' with tag '$tag_key=$tag_value'..."
+    aws s3api put-bucket-tagging --bucket "$bucket_name" --tagging "TagSet=$tagging_json"
+
+    if [ $? -eq 0 ]; then
+        echo "Successfully tagged bucket '$bucket_name'."
+    else
+        echo "Failed to tag bucket '$bucket_name'. Please check the bucket name and your permissions."
+    fi
+done < "$CSV_FILE"
+

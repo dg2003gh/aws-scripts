@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+
+declare -A critical_ports
+declare -A expose_to_world_by_port
+
+critical_ports=(
+  [22]="SSH"
+  [80]="HTTP"
+  [443]="HTTPS"
+  [3306]="MySQL"
+  [5432]="PostgreSQL"
+)
+
+critical_sgs=()
+secure_sgs=()
+expose_to_world=0
+csv_path="./open_ports_to_world.csv"
+
+echo "security Group, da porta, IP Range, para porta" >"$csv_path"
+
+check_security_group() {
+  local sg_id=$1
+  local sg_name=$2
+  local open_ports=()
+
+  # Describe the security group and filter for ingress rules
+  local rules
+  rules=$(aws ec2 describe-security-groups --group-ids "$sg_id" --query "SecurityGroups[0].IpPermissions[]")
+
+  for port in "${!critical_ports[@]}"; do
+    exposed=$(jq ".[] | select((.FromPort == ${port}) and .IpRanges[].CidrIp == \"0.0.0.0/0\") | .ToPort" <<<"$rules")
+
+    # Check if the port is open
+    if grep -q "\"FromPort\": $port" <<<"$rules"; then
+      open_ports+=("$port (${critical_ports[$port]})")
+    fi
+
+    # Check if port is expose to world
+    if [[ -n "$exposed" ]]; then
+      ((expose_to_world += 1))
+      ((expose_to_world_by_port["$port"] += 1))
+
+      echo "${sg_name}, ${port}(${critical_ports[$port]}), 0.0.0.0/0, ${exposed}" >>"$csv_path"
+    fi
+
+  done
+
+  echo "$rules"
+
+  # Output the result
+  if [ ${#open_ports[@]} -ne 0 ]; then
+    echo -e "\033[31mSecurity Group: $sg_name ($sg_id) - Portas criticas abertas: ${open_ports[*]}\033[0m"
+    critical_sgs+=("$sg_name")
+  else
+    echo -e "\033[32mSecurity Group: $sg_name ($sg_id) - Nenhuma porta critica aberta.\033[0m"
+    secure_sgs+=("$sg_name")
+  fi
+}
+
+# Get all security groups
+security_groups=$(aws ec2 describe-security-groups --query "SecurityGroups[*].{ID:GroupId,Name:GroupName}" --output json)
+
+echo "/=====================/Verificando security groups/=====================/"
+for row in $(echo "${security_groups}" | jq -c '.[]'); do
+  sg_id=$(echo "$row" | jq -r '.ID')
+  sg_name=$(echo "$row" | jq -r '.Name')
+
+  check_security_group "$sg_id" "$sg_name"
+done
+
+echo -e "
+/========/Sumário/========/
+
+Grupos criticos: \033[31m${#critical_sgs[@]}\033[0m
+Grupos seguros: \033[32m${#secure_sgs[@]}\033[0m
+
+\033[34mPortas SSH para o mundo: ${expose_to_world_by_port[22]:=0}\033[0m
+\033[35mPortas HTTP para o mundo: ${expose_to_world_by_port[80]:=0}\033[0m
+\033[36mPortas HTTPS para o mundo: ${expose_to_world_by_port[443]:=0}\033[0m
+\033[37mPortas MYSQL para o mundo: ${expose_to_world_by_port[3306]:=0}\033[0m
+\033[38mPortas POSTGRESQL para o mundo: ${expose_to_world_by_port[5432]:=0}\033[0m
+
+
+\033[32m${expose_to_world=:nenhuma} porta(s) expostas ao mundo!\033[0m
+
+CSV gerado:
+
+"
+
+cat "$csv_path"
